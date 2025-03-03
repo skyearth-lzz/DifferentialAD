@@ -1,18 +1,13 @@
-import pickle
-import os
+import numpy as np
 import pandas as pd
+from openpyxl.reader.excel import load_workbook
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
-from model.trans_ad.models import *
-from model.trans_ad.constants import *
-from model.trans_ad.plotting import *
-from model.trans_ad.pot import *
-from model.trans_ad.utils import *
-from model.trans_ad.diagnosis import *
+
 from model.trans_ad.merlin import *
-from torch.utils.data import Dataset, DataLoader, TensorDataset
-import torch.nn as nn
-from time import time
-from pprint import pprint
+from model.trans_ad.models import *
+from model.trans_ad.plotting import *
+
 # from beepy import beep
 
 plt.rcParams['font.sans-serif']=['SimHei']
@@ -358,6 +353,74 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training = True):
             return loss.item(), optimizer.param_groups[0]['lr']
         else:
             return loss.detach().numpy(), y_pred.detach().numpy()
+
+
+if __name__ == '__main__1':
+    train_loader, test_loader, labels = load_dataset(args.dataset)
+    if args.model in ['MERLIN']:
+        eval(f'run_{args.model.lower()}(test_loader, labels, args.dataset)')
+    model, optimizer, scheduler, epoch, accuracy_list = load_model(args.model, labels.shape[1])
+
+    ## Prepare data
+    trainD, testD = next(iter(train_loader)), next(iter(test_loader))
+    trainO, testO = trainD, testD
+    if model.name in ['Attention', 'DAGMM', 'USAD', 'MSCRED', 'CAE_M', 'GDN', 'MTAD_GAT',
+                      'MAD_GAN'] or 'TranAD' in model.name:
+        trainD, testD = convert_to_windows(trainD, model), convert_to_windows(testD, model)
+
+    print(f'{color.HEADER}Training {args.model} on {args.dataset}{color.ENDC}')
+    num_epochs = args.epoch
+
+    metrics = []
+
+    for epoch in range(num_epochs):
+        model.train()
+        lossT, lr = backprop(epoch, model, trainD, trainO, optimizer, scheduler)
+        save_model(model, optimizer, scheduler, epoch, accuracy_list)
+
+        ### Testing phase
+        torch.zero_grad = True
+        model.eval()
+        loss, y_pred = backprop(0, model, testD, testO, optimizer, scheduler, training=False)
+
+
+        # 计算训练集数据在训练好的模型上的损失
+        lossT, _ = backprop(0, model, trainD, trainO, optimizer, scheduler, training=False)
+        for i in range(loss.shape[1]):
+            # 取出每个维度的训练损失，测试损失，异常标签
+            lt, l, ls = lossT[:, i], loss[:, i], labels[:, i]
+            result, pred = pot_eval(lt, l, ls);
+            preds.append(pred)
+        # preds = np.concatenate([i.reshape(-1, 1) + 0 for i in preds], axis=1)
+        # pd.DataFrame(preds, columns=[str(i) for i in range(10)]).to_csv('labels.csv')
+        lossTfinal, lossFinal = np.mean(lossT, axis=1), np.mean(loss, axis=1)
+        labelsFinal = (np.sum(labels, axis=1) >= 1) + 0
+        result, _ = pot_eval(lossTfinal, lossFinal, labelsFinal)
+        result.update(hit_att(loss, labels))
+        result.update(ndcg(loss, labels))
+        result['train_loss'] = np.mean(lossTfinal)
+        result['test_loss'] = np.mean(lossFinal)
+        metrics.append(result)
+        # pprint(getresults2(df, result))
+        # beep(4)
+
+
+    data_frame = pd.DataFrame(metrics)
+    # 检查文件是否已存在
+    try:
+        # 加载现有的 Excel 文件
+        book = load_workbook("metrics.xlsx")
+        if args.dataset in book.sheetnames:
+            del book[args.dataset]
+
+        # 创建一个新的工作表并写入数据
+        with pd.ExcelWriter("metrics.xlsx", engine="openpyxl", mode="a") as writer:
+            data_frame.to_excel(writer, sheet_name=args.dataset, index=True)
+    except FileNotFoundError:
+        # 如果文件不存在，创建一个新的 ExcelWriter
+        with pd.ExcelWriter("metrics.xlsx", engine="openpyxl", mode="w") as writer:
+            data_frame.to_excel(writer, sheet_name=args.dataset, index=True)
+
 
 if __name__ == '__main__':
     train_loader, test_loader, labels = load_dataset(args.dataset)
